@@ -154,10 +154,21 @@ pub struct UpdateSegmentArgs {
 pub async fn update_segment(args: UpdateSegmentArgs) -> Result<(), String> {
     let settings = settings::load().map_err(|e| format!("{e:#}"))?;
     let client = ParlyxClient::new(settings.parlyx_server_base_url, settings.api_key);
-    client
+    tracing::info!(
+        stream_id = %args.stream_id,
+        segment_id = %args.segment_id,
+        text_len = args.text.as_deref().map(str::len).unwrap_or(0),
+        speaker = args.speaker.as_deref().unwrap_or(""),
+        "PUT segment edit"
+    );
+    let result = client
         .update_segment(&args.stream_id, &args.segment_id, args.text, args.speaker)
-        .await
-        .map_err(|e| format!("{e:#}"))
+        .await;
+    match &result {
+        Ok(()) => tracing::info!(segment_id = %args.segment_id, "segment edit applied"),
+        Err(e) => tracing::warn!(segment_id = %args.segment_id, error = ?e, "segment edit failed"),
+    }
+    result.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

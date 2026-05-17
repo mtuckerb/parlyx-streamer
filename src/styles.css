@@ -193,10 +193,24 @@ input:focus, select:focus, textarea:focus {
   border-radius: var(--radius);
   padding: 10px 12px;
   display: grid;
-  grid-template-columns: 140px 1fr;
+  grid-template-columns: 140px 1fr 12px;
   gap: 12px;
   align-items: start;
+  position: relative;
 }
+
+.save-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  align-self: center;
+  transition: background 0.15s ease;
+}
+.save-dot.clean { background: transparent; }
+.save-dot.saving { background: var(--orange); animation: pulse 1s ease-in-out infinite; }
+.save-dot.saved { background: var(--accent); }
+.save-dot.error { background: var(--red); }
 
 .segment-speaker input {
   font-weight: 600;

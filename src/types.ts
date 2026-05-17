@@ -15,7 +15,7 @@ export type StreamEvent =
   | { type: "transcript"; text: string; timestamp: string; speaker: string | null; segment_id: string }
   | { type: "partial"; text: string }
   | { type: "diarization"; segments: Array<{ start: number; end: number; speaker: string }> }
-  | { type: "speaker_rename"; from: string; to: string }
+  | { type: "speakerrename"; from: string; to: string }
   | { type: "error"; message: string }
   | { type: "complete" };
 
