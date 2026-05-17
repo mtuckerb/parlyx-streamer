@@ -1,6 +1,10 @@
 target/
 node_modules/
-dist/
+# Vite output dir — track only the placeholder so `cargo check`
+# in src-tauri/ works without needing `vite build` first; `vite build`
+# overwrites this file during a real frontend build.
+dist/*
+!dist/index.html
 .DS_Store
 .vscode/
 .idea/
