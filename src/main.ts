@@ -5,6 +5,12 @@ import type { AudioDevice, Segment, SessionStatus, Settings, StreamEvent } from 
 type Tab = "record" | "settings";
 type SaveState = "clean" | "saving" | "saved" | "error";
 
+interface DiarSegment {
+  start: number;
+  end: number;
+  speaker: string;
+}
+
 interface AppState {
   tab: Tab;
   settings: Settings;
@@ -20,6 +26,10 @@ interface AppState {
   deviceName: string;
   chunksSent: number;
   eventsReceived: number;
+  // Latest diarization ranges from parlyx. Each transcript chunk's mid-time
+  // is matched against these to retroactively label rows that came in
+  // before diarization had any data.
+  diarization: DiarSegment[];
 }
 
 const state: AppState = {
@@ -37,6 +47,7 @@ const state: AppState = {
   deviceName: "",
   chunksSent: 0,
   eventsReceived: 0,
+  diarization: [],
 };
 
 // Per-event-render performance — avoid full re-render on every transcript /
@@ -87,16 +98,22 @@ async function init() {
 
 function handleStreamEvent(evt: StreamEvent) {
   switch (evt.type) {
-    case "transcript":
+    case "transcript": {
+      // If parlyx already resolved the speaker, use it. Otherwise fall back
+      // to the latest diarization data we have stashed; if we still have
+      // nothing, render an em-dash placeholder that diarization will
+      // overwrite when it arrives.
+      const resolved = evt.speaker ?? speakerForTimestamp(evt.timestamp);
       addSegment({
         id: evt.segment_id,
-        speaker: evt.speaker ?? "—",
+        speaker: resolved ?? "—",
         text: evt.text,
         timestamp: evt.timestamp,
       });
       state.partial = "";
       updatePartial();
       break;
+    }
     case "partial":
       state.partial = evt.text;
       updatePartial();
@@ -110,7 +127,12 @@ function handleStreamEvent(evt: StreamEvent) {
       }
       break;
     case "diarization":
-      /* TODO: apply retroactive speaker labels by start/end matching */
+      // parlyx fires this every ~15 s with the latest speaker timeline.
+      // Use it for two things: stash so future transcripts can self-label,
+      // and walk existing rows whose speaker is unknown / em-dash and label
+      // them in place.
+      state.diarization = evt.segments;
+      applyDiarizationRetroactively();
       break;
     case "error":
       state.errorMessage = evt.message;
@@ -120,6 +142,45 @@ function handleStreamEvent(evt: StreamEvent) {
       /* status update will follow via parlyx://status */
       break;
   }
+}
+
+/// Parse a timestamp string like "12.3s" back into seconds.
+function parseTimestamp(ts: string): number | null {
+  const m = ts.match(/^([0-9]+(?:\.[0-9]+)?)s?$/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+function speakerForTimestamp(ts: string): string | null {
+  const t = parseTimestamp(ts);
+  if (t === null) return null;
+  // parlyx chunks are 3 s wide; match against the mid-point so a chunk that
+  // straddles a speaker boundary picks whichever speaker owns most of it.
+  const mid = t + 1.5;
+  for (const d of state.diarization) {
+    if (mid >= d.start && mid < d.end) return d.speaker;
+  }
+  return null;
+}
+
+function applyDiarizationRetroactively() {
+  if (state.diarization.length === 0) return;
+  for (const seg of state.segments) {
+    // Only overwrite rows that have a parlyx-default speaker label (em-dash
+    // placeholder, raw SPEAKER_XX, or empty). Never clobber a user-edited
+    // name like "Alice".
+    if (!isAutoSpeaker(seg.speaker)) continue;
+    const next = speakerForTimestamp(seg.timestamp);
+    if (next && next !== seg.speaker) {
+      seg.speaker = next;
+      applyRemoteSpeaker(seg.id, next);
+    }
+  }
+}
+
+function isAutoSpeaker(s: string | null | undefined): boolean {
+  if (!s) return true;
+  if (s === "—") return true;
+  return /^SPEAKER_\d+$/.test(s);
 }
 
 function activeStreamId(): string | null {
