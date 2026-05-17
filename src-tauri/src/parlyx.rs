@@ -72,13 +72,14 @@ impl ParlyxClient {
     }
 
     pub async fn send_chunk(&self, stream_id: &str, chunk_index: u64, wav: Bytes) -> Result<()> {
-        let filename = format!("chunk_{}.wav", chunk_index);
+        // Parlyx's receive_chunk handler expects the multipart field to be
+        // named `audio`. The chunk index is assigned server-side via an
+        // atomic counter on the session, so we don't pass it here.
+        let filename = format!("chunk_{:06}.wav", chunk_index);
         let part = Part::bytes(wav.to_vec())
             .file_name(filename)
             .mime_str("audio/wav")?;
-        let form = Form::new()
-            .text("chunk_index", chunk_index.to_string())
-            .part("file", part);
+        let form = Form::new().part("audio", part);
 
         let resp = self
             .http
