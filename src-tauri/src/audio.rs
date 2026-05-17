@@ -213,6 +213,8 @@ fn run_capture(
     let samples_at_input_rate =
         ((TARGET_SAMPLE_RATE as f32 * CHUNK_DURATION_S) * (in_sample_rate as f32 / TARGET_SAMPLE_RATE as f32)) as usize;
 
+    let mut chunk_idx: u64 = 0;
+    let mut consecutive_silent: u32 = 0;
     loop {
         if *stop_flag.lock() {
             break;
@@ -239,6 +241,32 @@ fn run_capture(
             },
         };
 
+        // Audio level diagnostics: RMS and peak. If chunks are silent we
+        // probably never got mic permission (macOS) or the wrong device is
+        // selected; the user should know before they speak for 30 minutes
+        // into the void.
+        let (rms, peak) = level_stats(&chunk_out);
+        if peak < 1e-4 {
+            consecutive_silent += 1;
+            if consecutive_silent == 1 || consecutive_silent % 5 == 0 {
+                warn!(
+                    chunk = chunk_idx,
+                    peak,
+                    rms,
+                    consecutive_silent,
+                    "audio chunk is essentially silent — check macOS Settings → \
+                     Privacy & Security → Microphone, or pick a different input device"
+                );
+            }
+        } else {
+            if consecutive_silent > 0 {
+                info!(consecutive_silent, "audio resumed");
+            }
+            consecutive_silent = 0;
+            info!(chunk = chunk_idx, peak, rms, samples = chunk_out.len(), "captured chunk");
+        }
+        chunk_idx += 1;
+
         if chunk_tx.send(chunk_out).is_err() {
             // receiver dropped → session ended
             break;
@@ -248,6 +276,23 @@ fn run_capture(
     drop(stream);
     info!("audio capture loop exited cleanly");
     Ok(())
+}
+
+fn level_stats(samples: &[f32]) -> (f32, f32) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut sumsq = 0.0_f64;
+    let mut peak = 0.0_f32;
+    for &s in samples {
+        let a = s.abs();
+        if a > peak {
+            peak = a;
+        }
+        sumsq += (s as f64) * (s as f64);
+    }
+    let rms = (sumsq / samples.len() as f64).sqrt() as f32;
+    (rms, peak)
 }
 
 fn downmix_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
