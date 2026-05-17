@@ -42,16 +42,15 @@ impl ParlyxClient {
 
     pub async fn start_streaming(
         &self,
-        title: Option<String>,
-        min_speakers: Option<u32>,
-        max_speakers: Option<u32>,
-        webhook_url: Option<String>,
+        diarize: bool,
+        summarize: bool,
     ) -> Result<StartStreamingResponse> {
+        // parlyx's StartStreamingRequest currently accepts only `diarize` and
+        // `summarize`. Title, speaker counts, and webhook are wired in
+        // *after* start via the task-rename / webhook-register endpoints.
         let body = StartStreamingRequest {
-            title,
-            min_speakers,
-            max_speakers,
-            webhook_url,
+            diarize: Some(diarize),
+            summarize: Some(summarize),
         };
         let resp = self
             .http
@@ -69,6 +68,28 @@ impl ParlyxClient {
             ));
         }
         Ok(resp.json::<StartStreamingResponse>().await?)
+    }
+
+    /// Rename the task created by `start_streaming` so the user-supplied title
+    /// shows up in the parlyx tasks list. Best-effort; failures don't abort the
+    /// recording.
+    pub async fn set_task_title(&self, task_id: &str, title: &str) -> Result<()> {
+        let resp = self
+            .http
+            .put(self.url(&format!("/tasks/{}/title", task_id)))
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({ "title": title }))
+            .send()
+            .await
+            .context("PUT /tasks/:id/title")?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "set_task_title HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(())
     }
 
     pub async fn send_chunk(&self, stream_id: &str, chunk_index: u64, wav: Bytes) -> Result<()> {
@@ -225,10 +246,8 @@ fn parse_sse(raw: &str) -> Option<StreamEvent> {
 
 #[derive(Debug, Serialize)]
 pub struct StartStreamingRequest {
-    pub title: Option<String>,
-    pub min_speakers: Option<u32>,
-    pub max_speakers: Option<u32>,
-    pub webhook_url: Option<String>,
+    pub diarize: Option<bool>,
+    pub summarize: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,29 +268,29 @@ pub struct SegmentEditRequest {
 }
 
 /// Server-sent events emitted by parlyx's streaming session.
-/// Mirrors `StreamEvent` in `src/handlers/streaming.rs`.
+/// Mirrors `StreamEvent` in `src/handlers/streaming.rs`. Parlyx uses
+/// `rename_all = "lowercase"` which is *not* the same as snake_case for
+/// multi-word variants — e.g. `SpeakerRename` serializes as `"speakerrename"`
+/// (no underscore). We mirror that with explicit `rename` attributes.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum StreamEvent {
+    #[serde(rename = "transcript")]
     Transcript {
         text: String,
         timestamp: String,
         speaker: Option<String>,
         segment_id: String,
     },
-    Partial {
-        text: String,
-    },
-    Diarization {
-        segments: Vec<DiarizationSegment>,
-    },
-    SpeakerRename {
-        from: String,
-        to: String,
-    },
-    Error {
-        message: String,
-    },
+    #[serde(rename = "partial")]
+    Partial { text: String },
+    #[serde(rename = "diarization")]
+    Diarization { segments: Vec<DiarizationSegment> },
+    #[serde(rename = "speakerrename")]
+    SpeakerRename { from: String, to: String },
+    #[serde(rename = "error")]
+    Error { message: String },
+    #[serde(rename = "complete")]
     Complete,
 }
 

@@ -16,6 +16,10 @@ use tracing::{error, info, warn};
 pub const EVENT_STREAM: &str = "parlyx://stream-event";
 /// Status updates (started, paused, stopped, error) for the web UI.
 pub const EVENT_STATUS: &str = "parlyx://status";
+/// Per-chunk + per-SSE-event "I'm alive" pings so the UI can show a counter.
+/// Payload is the current cumulative count.
+pub const EVENT_CHUNK_SENT: &str = "parlyx://chunk-sent";
+pub const EVENT_EVENT_RECEIVED: &str = "parlyx://event-received";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status")]
@@ -57,13 +61,13 @@ impl SessionRunner {
         client: ParlyxClient,
         app: AppHandle,
         title: Option<String>,
-        min_speakers: Option<u32>,
-        max_speakers: Option<u32>,
-        webhook_url: Option<String>,
+        _min_speakers: Option<u32>,
+        _max_speakers: Option<u32>,
+        _webhook_url: Option<String>,
         device_name: Option<String>,
     ) -> Result<Self> {
         let resp = client
-            .start_streaming(title, min_speakers, max_speakers, webhook_url)
+            .start_streaming(true, true)
             .await
             .context("starting parlyx streaming session")?;
 
@@ -72,6 +76,13 @@ impl SessionRunner {
             task_id = %resp.task_id,
             "streaming session opened"
         );
+
+        // Best-effort title rename. parlyx defaults to "Live Recording".
+        if let Some(t) = title.as_ref().filter(|s| !s.trim().is_empty()) {
+            if let Err(e) = client.set_task_title(&resp.task_id, t).await {
+                warn!(error = ?e, "set_task_title failed (continuing)");
+            }
+        }
 
         // Audio thread → tokio task channel. `tokio::sync::mpsc`'s sender is
         // sync (`.send` does not await), so the cpal-owning thread can drop
@@ -93,17 +104,24 @@ impl SessionRunner {
                         continue;
                     }
                 };
-                if let Err(e) = client_for_chunks
+                let bytes_len = wav.len();
+                match client_for_chunks
                     .send_chunk(&stream_id_for_chunks, idx, wav)
                     .await
                 {
-                    warn!(error = ?e, idx, "send_chunk failed");
-                    let _ = app_for_chunks.emit(
-                        EVENT_STATUS,
-                        SessionStatus::Error {
-                            message: format!("chunk upload failed: {}", e),
-                        },
-                    );
+                    Ok(()) => {
+                        info!(idx, bytes = bytes_len, "chunk uploaded");
+                        let _ = app_for_chunks.emit(EVENT_CHUNK_SENT, idx + 1);
+                    }
+                    Err(e) => {
+                        warn!(error = ?e, idx, "send_chunk failed");
+                        let _ = app_for_chunks.emit(
+                            EVENT_STATUS,
+                            SessionStatus::Error {
+                                message: format!("chunk upload failed: {}", e),
+                            },
+                        );
+                    }
                 }
                 idx += 1;
             }
@@ -116,7 +134,12 @@ impl SessionRunner {
         let events_task = tokio::spawn(async move {
             match client_for_events.open_events(&stream_id_for_events).await {
                 Ok(mut rx) => {
+                    info!("SSE event stream open");
+                    let mut received: u64 = 0;
                     while let Some(event) = rx.recv().await {
+                        received += 1;
+                        info!(received, ?event, "SSE event");
+                        let _ = app_for_events.emit(EVENT_EVENT_RECEIVED, received);
                         let _ = app_for_events.emit(EVENT_STREAM, &event);
                         if matches!(event, StreamEvent::Complete) {
                             break;
@@ -125,6 +148,12 @@ impl SessionRunner {
                 }
                 Err(e) => {
                     error!(error = ?e, "could not open SSE event stream");
+                    let _ = app_for_events.emit(
+                        EVENT_STATUS,
+                        SessionStatus::Error {
+                            message: format!("SSE connection failed: {}", e),
+                        },
+                    );
                 }
             }
             info!("events task exiting");

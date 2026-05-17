@@ -16,6 +16,8 @@ interface AppState {
   minSpeakers: number;
   maxSpeakers: number;
   deviceName: string;
+  chunksSent: number;
+  eventsReceived: number;
 }
 
 const state: AppState = {
@@ -30,6 +32,8 @@ const state: AppState = {
   minSpeakers: 2,
   maxSpeakers: 6,
   deviceName: "",
+  chunksSent: 0,
+  eventsReceived: 0,
 };
 
 const editDebounce = new Map<string, ReturnType<typeof setTimeout>>();
@@ -57,6 +61,14 @@ async function init() {
   await listen<SessionStatus>("parlyx://status", (evt) => {
     state.status = evt.payload;
     if (evt.payload.status === "Error") state.errorMessage = evt.payload.message;
+    render();
+  });
+  await listen<number>("parlyx://chunk-sent", (evt) => {
+    state.chunksSent = evt.payload;
+    render();
+  });
+  await listen<number>("parlyx://event-received", (evt) => {
+    state.eventsReceived = evt.payload;
     render();
   });
 
@@ -141,6 +153,8 @@ async function startRecording() {
   state.errorMessage = null;
   state.segments = [];
   state.partial = "";
+  state.chunksSent = 0;
+  state.eventsReceived = 0;
   try {
     await invoke<SessionStatus>("start_streaming", {
       args: {
@@ -410,7 +424,13 @@ function renderStatusBar(): HTMLElement {
       label = `error — ${state.status.message}`;
       break;
   }
-  bar.innerHTML = `<span class="status-dot ${dotClass}"></span><span>${escapeHtml(label)}</span>`;
+  bar.innerHTML = `
+    <span class="status-dot ${dotClass}"></span>
+    <span>${escapeHtml(label)}</span>
+    <span style="margin-left:auto;color:var(--text-muted);font-size:11px">
+      chunks: ${state.chunksSent} · events: ${state.eventsReceived}
+    </span>
+  `;
   return bar;
 }
 
