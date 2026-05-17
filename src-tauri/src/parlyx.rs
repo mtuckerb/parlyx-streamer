@@ -15,7 +15,7 @@ use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct ParlyxClient {
@@ -164,6 +164,7 @@ impl ParlyxClient {
     /// tokio runtime until the stream ends or the receiver is dropped.
     pub async fn open_events(&self, stream_id: &str) -> Result<mpsc::UnboundedReceiver<StreamEvent>> {
         let url = self.url(&format!("/streaming/{}/events", stream_id));
+        info!(%url, "opening SSE stream");
         let resp = self
             .http
             .get(&url)
@@ -172,10 +173,12 @@ impl ParlyxClient {
             .send()
             .await
             .context("GET /streaming/:id/events")?;
+        let status = resp.status();
+        info!(%status, "SSE response received");
         if !resp.status().is_success() {
             return Err(anyhow!(
                 "events HTTP {}: {}",
-                resp.status(),
+                status,
                 resp.text().await.unwrap_or_default()
             ));
         }
@@ -184,17 +187,38 @@ impl ParlyxClient {
         tokio::spawn(async move {
             let mut buffer = String::new();
             let mut stream = resp.bytes_stream();
+            let mut bytes_total: usize = 0;
+            let mut frames_total: usize = 0;
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(chunk) => {
+                        bytes_total += chunk.len();
                         let chunk_str = String::from_utf8_lossy(&chunk);
+                        debug!(bytes = chunk.len(), total = bytes_total, "SSE chunk");
                         buffer.push_str(&chunk_str);
-                        while let Some(idx) = buffer.find("\n\n") {
+                        // axum's SSE writer uses \n line terminators. We
+                        // also accept \r\n just in case a reverse proxy
+                        // rewrites them.
+                        loop {
+                            let cut = buffer
+                                .find("\n\n")
+                                .map(|i| (i, 2usize))
+                                .or_else(|| buffer.find("\r\n\r\n").map(|i| (i, 4usize)));
+                            let Some((idx, delim_len)) = cut else { break };
                             let raw = buffer[..idx].to_string();
-                            buffer.drain(..idx + 2);
-                            if let Some(evt) = parse_sse(&raw) {
-                                if tx.send(evt).is_err() {
-                                    return;
+                            buffer.drain(..idx + delim_len);
+                            frames_total += 1;
+                            debug!(frame = frames_total, raw = %raw, "SSE frame");
+                            match parse_sse(&raw) {
+                                Some(evt) => {
+                                    if tx.send(evt).is_err() {
+                                        info!("SSE receiver dropped, exiting task");
+                                        return;
+                                    }
+                                }
+                                None => {
+                                    // Comment or unparsable — log only at debug.
+                                    debug!(raw = %raw, "SSE frame had no parseable event (likely keep-alive)");
                                 }
                             }
                         }
@@ -205,7 +229,7 @@ impl ParlyxClient {
                     }
                 }
             }
-            debug!("SSE stream closed");
+            info!(bytes_total, frames_total, "SSE stream closed");
         });
         Ok(rx)
     }
@@ -214,6 +238,11 @@ impl ParlyxClient {
 fn parse_sse(raw: &str) -> Option<StreamEvent> {
     let mut data_lines: Vec<&str> = Vec::new();
     for line in raw.lines() {
+        // SSE comment lines start with `:` (keep-alive frames look like
+        // `:keep-alive`). Skip them.
+        if line.starts_with(':') {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("data:") {
             data_lines.push(rest.trim_start());
         }
@@ -222,7 +251,13 @@ fn parse_sse(raw: &str) -> Option<StreamEvent> {
         return None;
     }
     let joined = data_lines.join("\n");
-    serde_json::from_str::<StreamEvent>(&joined).ok()
+    match serde_json::from_str::<StreamEvent>(&joined) {
+        Ok(evt) => Some(evt),
+        Err(e) => {
+            warn!(error = %e, payload = %joined, "SSE frame failed to deserialize");
+            None
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
