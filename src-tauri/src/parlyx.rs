@@ -44,13 +44,16 @@ impl ParlyxClient {
         &self,
         diarize: bool,
         summarize: bool,
+        title: Option<String>,
+        min_speakers: Option<u32>,
+        max_speakers: Option<u32>,
     ) -> Result<StartStreamingResponse> {
-        // parlyx's StartStreamingRequest currently accepts only `diarize` and
-        // `summarize`. Title, speaker counts, and webhook are wired in
-        // *after* start via the task-rename / webhook-register endpoints.
         let body = StartStreamingRequest {
             diarize: Some(diarize),
             summarize: Some(summarize),
+            title: title.filter(|t| !t.trim().is_empty()),
+            min_speakers,
+            max_speakers,
         };
         let resp = self
             .http
@@ -68,28 +71,6 @@ impl ParlyxClient {
             ));
         }
         Ok(resp.json::<StartStreamingResponse>().await?)
-    }
-
-    /// Rename the task created by `start_streaming` so the user-supplied title
-    /// shows up in the parlyx tasks list. Best-effort; failures don't abort the
-    /// recording.
-    pub async fn set_task_title(&self, task_id: &str, title: &str) -> Result<()> {
-        let resp = self
-            .http
-            .put(self.url(&format!("/tasks/{}/title", task_id)))
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({ "title": title }))
-            .send()
-            .await
-            .context("PUT /tasks/:id/title")?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "set_task_title HTTP {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            ));
-        }
-        Ok(())
     }
 
     pub async fn send_chunk(&self, stream_id: &str, chunk_index: u64, wav: Bytes) -> Result<()> {
@@ -248,6 +229,12 @@ fn parse_sse(raw: &str) -> Option<StreamEvent> {
 pub struct StartStreamingRequest {
     pub diarize: Option<bool>,
     pub summarize: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_speakers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_speakers: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

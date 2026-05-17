@@ -61,13 +61,13 @@ impl SessionRunner {
         client: ParlyxClient,
         app: AppHandle,
         title: Option<String>,
-        _min_speakers: Option<u32>,
-        _max_speakers: Option<u32>,
+        min_speakers: Option<u32>,
+        max_speakers: Option<u32>,
         _webhook_url: Option<String>,
         device_name: Option<String>,
     ) -> Result<Self> {
         let resp = client
-            .start_streaming(true, true)
+            .start_streaming(true, true, title, min_speakers, max_speakers)
             .await
             .context("starting parlyx streaming session")?;
 
@@ -76,13 +76,6 @@ impl SessionRunner {
             task_id = %resp.task_id,
             "streaming session opened"
         );
-
-        // Best-effort title rename. parlyx defaults to "Live Recording".
-        if let Some(t) = title.as_ref().filter(|s| !s.trim().is_empty()) {
-            if let Err(e) = client.set_task_title(&resp.task_id, t).await {
-                warn!(error = ?e, "set_task_title failed (continuing)");
-            }
-        }
 
         // Audio thread → tokio task channel. `tokio::sync::mpsc`'s sender is
         // sync (`.send` does not await), so the cpal-owning thread can drop
